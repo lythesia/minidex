@@ -26,21 +26,23 @@ pub struct Order {
 #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
-    TokenA,
-    TokenB,
+    Base,
+    Quote,
 }
 
 #[derive(Debug)]
 pub struct EventFilled {
     pub order_id: u64,
+    pub side: Side,
     pub filled_price: u128,
     pub filled_qty: u128,
 }
 
 impl EventFilled {
-    pub fn new(order_id: u64, filled_price: u128, filled_qty: u128) -> Self {
+    pub fn new(order_id: u64, side: Side, filled_price: u128, filled_qty: u128) -> Self {
         Self {
             order_id,
+            side,
             filled_price,
             filled_qty,
         }

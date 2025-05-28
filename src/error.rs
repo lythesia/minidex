@@ -6,6 +6,8 @@ use crate::types::Token;
 #[ink::scale_derive(Encode, Decode, TypeInfo)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    InsufficientAllowance(Token),
+    InsufficientToken(Token),
     InvalidQuantity(String),
     InvalidPrice(String),
     InvalidOrder(String),

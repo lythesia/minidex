@@ -18,10 +18,10 @@ pub struct BTreeOrderBook {
     // all orders
     orders: Mapping<u64, Order>,
 
-    // sell orders: (price, Reverse(timestamp), order_id) -> order_id
+    // sell orders: (price, timestamp, order_id) -> order_id
     sell_orders: StorageBTreeMap,
 
-    // buy orders: (Reverse(price), Reverse(timestamp), order_id) -> order_id
+    // buy orders: (Reverse(price), timestamp, order_id) -> order_id
     buy_orders: StorageBTreeMap,
 
     // order id generator
@@ -81,17 +81,13 @@ impl OrderBook for BTreeOrderBook {
         match order.side {
             Side::Buy => {
                 #[allow(clippy::arithmetic_side_effects)]
-                let key = (
-                    u128::MAX - order.price,
-                    u64::MAX - order.timestamp,
-                    order.id,
-                );
+                let key = (u128::MAX - order.price, order.timestamp, order.id);
                 self.buy_orders.insert(key, order.id);
                 self.max_buy_price = self.max_buy_price.max(order.price);
             }
             Side::Sell => {
                 #[allow(clippy::arithmetic_side_effects)]
-                let key = (order.price, u64::MAX - order.timestamp, order.id);
+                let key = (order.price, order.timestamp, order.id);
                 self.sell_orders.insert(key, order.id);
                 self.min_sell_price = self.min_sell_price.min(order.price);
             }
@@ -144,8 +140,18 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.remove(order_id);
 
                 // emit
-                evts.push(EventFilled::new(sell_order.id, deal_price, sell_order.qty));
-                evts.push(EventFilled::new(buy_order.id, deal_price, sell_order.qty));
+                evts.push(EventFilled::new(
+                    sell_order.id,
+                    sell_order.side,
+                    deal_price,
+                    sell_order.qty,
+                ));
+                evts.push(EventFilled::new(
+                    buy_order.id,
+                    buy_order.side,
+                    deal_price,
+                    sell_order.qty,
+                ));
             }
             // 2.2 partial fill
             else {
@@ -166,8 +172,18 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.insert(order_id, &sell_order);
 
                 // emit
-                evts.push(EventFilled::new(sell_order.id, deal_price, buy_order.qty));
-                evts.push(EventFilled::new(buy_order.id, deal_price, buy_order.qty));
+                evts.push(EventFilled::new(
+                    sell_order.id,
+                    sell_order.side,
+                    deal_price,
+                    buy_order.qty,
+                ));
+                evts.push(EventFilled::new(
+                    buy_order.id,
+                    buy_order.side,
+                    deal_price,
+                    buy_order.qty,
+                ));
 
                 buy_order.qty = 0;
                 break;
@@ -237,8 +253,18 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.remove(order_id);
 
                 // emit
-                evts.push(EventFilled::new(buy_order.id, deal_price, buy_order.qty));
-                evts.push(EventFilled::new(sell_order.id, deal_price, buy_order.qty));
+                evts.push(EventFilled::new(
+                    buy_order.id,
+                    buy_order.side,
+                    deal_price,
+                    buy_order.qty,
+                ));
+                evts.push(EventFilled::new(
+                    sell_order.id,
+                    sell_order.side,
+                    deal_price,
+                    buy_order.qty,
+                ));
             }
             // 2.2 partial fill
             else {
@@ -258,8 +284,18 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.insert(order_id, &buy_order);
 
                 // emit
-                evts.push(EventFilled::new(buy_order.id, deal_price, sell_order.qty));
-                evts.push(EventFilled::new(sell_order.id, deal_price, sell_order.qty));
+                evts.push(EventFilled::new(
+                    buy_order.id,
+                    buy_order.side,
+                    deal_price,
+                    sell_order.qty,
+                ));
+                evts.push(EventFilled::new(
+                    sell_order.id,
+                    sell_order.side,
+                    deal_price,
+                    sell_order.qty,
+                ));
                 sell_order.qty = 0;
                 break;
             }
@@ -295,11 +331,7 @@ impl OrderBook for BTreeOrderBook {
                 vault.unlock(order.owner, quote, amt).unwrap();
                 // clear buy order
                 #[allow(clippy::arithmetic_side_effects)]
-                let key = (
-                    u128::MAX - order.price,
-                    u64::MAX - order.timestamp,
-                    order.id,
-                );
+                let key = (u128::MAX - order.price, order.timestamp, order.id);
                 self.buy_orders.remove(&key);
             }
             Side::Sell => {
@@ -308,7 +340,7 @@ impl OrderBook for BTreeOrderBook {
                 vault.unlock(order.owner, base, order.qty).unwrap();
                 // clear sell order
                 #[allow(clippy::arithmetic_side_effects)]
-                let key = (order.price, u64::MAX - order.timestamp, order.id);
+                let key = (order.price, order.timestamp, order.id);
                 self.buy_orders.remove(&key);
             }
         }
@@ -334,10 +366,10 @@ mod tests {
         test::set_callee::<ink::env::DefaultEnvironment>(accounts.charlie);
 
         // Setup initial balances
-        vault.deposit(alice, Token::TokenA, 1000);
-        vault.deposit(alice, Token::TokenB, 1000);
-        vault.deposit(bob, Token::TokenA, 1000);
-        vault.deposit(bob, Token::TokenB, 1000);
+        vault.deposit(alice, Token::Base, 1000);
+        vault.deposit(alice, Token::Quote, 1000);
+        vault.deposit(bob, Token::Base, 1000);
+        vault.deposit(bob, Token::Quote, 1000);
 
         (book, vault, alice, bob)
     }
@@ -348,40 +380,34 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 10 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 1000).unwrap(); // Lock 1000 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 100, now);
+        vault.lock(alice, Token::Quote, 1000).unwrap(); // Lock 1000 TokenB
         buy_order.locked = 1000;
         book.insert_new_order(buy_order.clone());
 
         // Bob places a sell order: 100 TokenA at price 10 TokenB
         let mut sell_order = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             100,
             now + 1,
         );
-        vault.lock(bob, Token::TokenA, 100).unwrap(); // Lock 100 TokenA
+        vault.lock(bob, Token::Base, 100).unwrap(); // Lock 100 TokenA
         sell_order.locked = 100;
         book.insert_new_order(sell_order.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 1000);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900);
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 100);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 1000);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900);
+        assert_eq!(vault.get_locked(bob, Token::Base), 100);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
 
         // Match the orders
         let (remaining_sell, events) = book
@@ -400,14 +426,14 @@ mod tests {
         assert_eq!(sell_event.filled_qty, 100);
 
         // Check final balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1100); // Received 100 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0); // Spent 1000 TokenB
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900); // Spent 100 TokenA
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 2000); // Received 1000 TokenB
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1100); // Received 100 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0); // Spent 1000 TokenB
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900); // Spent 100 TokenA
+        assert_eq!(vault.get_locked(bob, Token::Base), 0);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 2000); // Received 1000 TokenB
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
     }
 
     #[test]
@@ -416,40 +442,34 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 50 TokenA at price 10 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            50,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 500).unwrap(); // Lock 500 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 50, now);
+        vault.lock(alice, Token::Quote, 500).unwrap(); // Lock 500 TokenB
         buy_order.locked = 500;
         book.insert_new_order(buy_order.clone());
 
         // Bob places a sell order: 100 TokenA at price 10 TokenB
         let mut sell_order = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             100,
             now + 1,
         );
-        vault.lock(bob, Token::TokenA, 100).unwrap(); // Lock 100 TokenA
+        vault.lock(bob, Token::Base, 100).unwrap(); // Lock 100 TokenA
         sell_order.locked = 100;
         book.insert_new_order(sell_order.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 500);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 500);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900); // 1000 - 100 locked
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 100);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 500);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 500);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900); // 1000 - 100 locked
+        assert_eq!(vault.get_locked(bob, Token::Base), 100);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
 
         // Match the orders
         let (remaining_sell, events) = book
@@ -471,14 +491,14 @@ mod tests {
         assert_eq!(sell_event.filled_qty, 50);
 
         // Check final balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1050); // Received 50 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 500); // Spent 500 TokenB
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900); // Still 900 because 100 was locked initially, 50 transferred, 50 still locked
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 50); // 50 TokenA still locked
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1500); // Received 500 TokenB
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1050); // Received 50 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 500); // Spent 500 TokenB
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900); // Still 900 because 100 was locked initially, 50 transferred, 50 still locked
+        assert_eq!(vault.get_locked(bob, Token::Base), 50); // 50 TokenA still locked
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1500); // Received 500 TokenB
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
     }
 
     #[test]
@@ -487,40 +507,34 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 8 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            8,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 800).unwrap(); // Lock 800 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 8, 100, now);
+        vault.lock(alice, Token::Quote, 800).unwrap(); // Lock 800 TokenB
         buy_order.locked = 800;
         book.insert_new_order(buy_order.clone());
 
         // Bob places a sell order: 100 TokenA at price 10 TokenB
         let mut sell_order = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             100,
             now + 1,
         );
-        vault.lock(bob, Token::TokenA, 100).unwrap(); // Lock 100 TokenA
+        vault.lock(bob, Token::Base, 100).unwrap(); // Lock 100 TokenA
         sell_order.locked = 100;
         book.insert_new_order(sell_order.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 200);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 800);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900);
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 100);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 200);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 800);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900);
+        assert_eq!(vault.get_locked(bob, Token::Base), 100);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
 
         // Match the orders
         let (remaining_sell, events) = book
@@ -535,14 +549,14 @@ mod tests {
         assert_eq!(remaining_sell.price, 10);
 
         // Check final balances - should be unchanged
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 200);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 800);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900);
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 100);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 200);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 800);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900);
+        assert_eq!(vault.get_locked(bob, Token::Base), 100);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
     }
 
     #[test]
@@ -551,52 +565,46 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 10 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 1000).unwrap(); // Lock 1000 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 100, now);
+        vault.lock(alice, Token::Quote, 1000).unwrap(); // Lock 1000 TokenB
         buy_order.locked = 1000;
         book.insert_new_order(buy_order.clone());
 
         // Bob places two sell orders: 60 TokenA and 40 TokenA at price 10 TokenB
         let mut sell_order1 = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             60,
             now + 1,
         );
-        vault.lock(bob, Token::TokenA, 60).unwrap(); // Lock 60 TokenA
+        vault.lock(bob, Token::Base, 60).unwrap(); // Lock 60 TokenA
         sell_order1.locked = 60;
         book.insert_new_order(sell_order1.clone());
 
         let mut sell_order2 = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             40,
             now + 2,
         );
-        vault.lock(bob, Token::TokenA, 40).unwrap(); // Lock 40 TokenA
+        vault.lock(bob, Token::Base, 40).unwrap(); // Lock 40 TokenA
         sell_order2.locked = 40;
         book.insert_new_order(sell_order2.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 1000);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900);
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 100);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 1000);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900);
+        assert_eq!(vault.get_locked(bob, Token::Base), 100);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
 
         // Match the first sell order
         let (remaining_sell1, events1) = book
@@ -630,14 +638,14 @@ mod tests {
         assert_eq!(sell_event2.filled_qty, 40);
 
         // Check final balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1100); // Received 100 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0); // Spent 1000 TokenB
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900); // Spent 100 TokenA
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 2000); // Received 1000 TokenB
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1100); // Received 100 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0); // Spent 1000 TokenB
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900); // Spent 100 TokenA
+        assert_eq!(vault.get_locked(bob, Token::Base), 0);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 2000); // Received 1000 TokenB
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
     }
 
     #[test]
@@ -646,40 +654,34 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 8 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            8,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 800).unwrap(); // Lock 800 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 8, 100, now);
+        vault.lock(alice, Token::Quote, 800).unwrap(); // Lock 800 TokenB
         buy_order.locked = 800;
         book.insert_new_order(buy_order.clone());
 
         // Bob places a sell order: 100 TokenA at price 6 TokenB
         let mut sell_order = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             6,
             100,
             now + 1,
         );
-        vault.lock(bob, Token::TokenA, 100).unwrap(); // Lock 100 TokenA
+        vault.lock(bob, Token::Base, 100).unwrap(); // Lock 100 TokenA
         sell_order.locked = 100;
         book.insert_new_order(sell_order.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 200);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 800);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900);
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 100);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 200);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 800);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900);
+        assert_eq!(vault.get_locked(bob, Token::Base), 100);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
 
         // Match the orders
         let (remaining_sell, events) = book
@@ -698,14 +700,14 @@ mod tests {
         assert_eq!(sell_event.filled_qty, 100);
 
         // Check final balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1100); // Received 100 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 400); // Spent 600 TokenB (at sell price), 200 TokenB unlocked
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900); // Spent 100 TokenA
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1600); // Received 600 TokenB
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1100); // Received 100 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 400); // Spent 600 TokenB (at sell price), 200 TokenB unlocked
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900); // Spent 100 TokenA
+        assert_eq!(vault.get_locked(bob, Token::Base), 0);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1600); // Received 600 TokenB
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
     }
 
     #[test]
@@ -714,40 +716,28 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 8 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            8,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 800).unwrap(); // Lock 800 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 8, 100, now);
+        vault.lock(alice, Token::Quote, 800).unwrap(); // Lock 800 TokenB
         buy_order.locked = 800;
         book.insert_new_order(buy_order.clone());
 
         // Bob places a sell order: 50 TokenA at price 6 TokenB
-        let mut sell_order = book.make_new_order(
-            bob,
-            (Token::TokenA, Token::TokenB),
-            Side::Sell,
-            6,
-            50,
-            now + 1,
-        );
-        vault.lock(bob, Token::TokenA, 50).unwrap(); // Lock 50 TokenA
+        let mut sell_order =
+            book.make_new_order(bob, (Token::Base, Token::Quote), Side::Sell, 6, 50, now + 1);
+        vault.lock(bob, Token::Base, 50).unwrap(); // Lock 50 TokenA
         sell_order.locked = 50;
         book.insert_new_order(sell_order.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 200);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 800);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 950);
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 50);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 200);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 800);
+        assert_eq!(vault.get_balance(bob, Token::Base), 950);
+        assert_eq!(vault.get_locked(bob, Token::Base), 50);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
 
         // Match the orders
         let (remaining_sell, events) = book
@@ -766,14 +756,14 @@ mod tests {
         assert_eq!(sell_event.filled_qty, 50);
 
         // Check final balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1050); // Received 50 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 200);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 500); // Spent 300 TokenB (at sell price), 500 TokenB trasnfer
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 950); // Spent 50 TokenA
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1300); // Received 300 TokenB
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1050); // Received 50 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 200);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 500); // Spent 300 TokenB (at sell price), 500 TokenB trasnfer
+        assert_eq!(vault.get_balance(bob, Token::Base), 950); // Spent 50 TokenA
+        assert_eq!(vault.get_locked(bob, Token::Base), 0);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1300); // Received 300 TokenB
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
     }
 
     #[test]
@@ -782,52 +772,46 @@ mod tests {
         let now = 1;
 
         // Alice places two buy orders: 60 TokenA at price 10 TokenB and 40 TokenA at price 10 TokenB
-        let mut buy_order1 = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            60,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 600).unwrap(); // Lock 600 TokenB
+        let mut buy_order1 =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 60, now);
+        vault.lock(alice, Token::Quote, 600).unwrap(); // Lock 600 TokenB
         buy_order1.locked = 600;
         book.insert_new_order(buy_order1.clone());
 
         let mut buy_order2 = book.make_new_order(
             alice,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Buy,
             10,
             40,
             now + 1,
         );
-        vault.lock(alice, Token::TokenB, 400).unwrap(); // Lock 400 TokenB
+        vault.lock(alice, Token::Quote, 400).unwrap(); // Lock 400 TokenB
         buy_order2.locked = 400;
         book.insert_new_order(buy_order2.clone());
 
         // Bob places a sell order: 100 TokenA at price 10 TokenB
         let mut sell_order = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             100,
             now + 2,
         );
-        vault.lock(bob, Token::TokenA, 100).unwrap(); // Lock 100 TokenA
+        vault.lock(bob, Token::Base, 100).unwrap(); // Lock 100 TokenA
         sell_order.locked = 100;
         book.insert_new_order(sell_order.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 1000);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900);
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 100);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 1000);
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 1000);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900);
+        assert_eq!(vault.get_locked(bob, Token::Base), 100);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 1000);
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
 
         // Match the sell order against both buy orders
         let (remaining_sell, events) = book
@@ -837,32 +821,31 @@ mod tests {
         assert_eq!(events.len(), 4); // Four fill events (two for each match)
 
         // Verify the matches by checking the events
-        // Note: buy_order2 (timestamp now+1) will be matched before buy_order1 (timestamp now)
         let (buy_event1, sell_event1) = (&events[0], &events[1]);
-        assert_eq!(buy_event1.order_id, buy_order2.id); // Second buy order matched first
+        assert_eq!(buy_event1.order_id, buy_order1.id); // Second buy order matched first
         assert_eq!(sell_event1.order_id, sell_order.id);
         assert_eq!(buy_event1.filled_price, 10);
         assert_eq!(sell_event1.filled_price, 10);
-        assert_eq!(buy_event1.filled_qty, 40);
-        assert_eq!(sell_event1.filled_qty, 40);
+        assert_eq!(buy_event1.filled_qty, 60);
+        assert_eq!(sell_event1.filled_qty, 60);
 
         let (buy_event2, sell_event2) = (&events[2], &events[3]);
-        assert_eq!(buy_event2.order_id, buy_order1.id); // First buy order matched second
+        assert_eq!(buy_event2.order_id, buy_order2.id); // First buy order matched second
         assert_eq!(sell_event2.order_id, sell_order.id);
         assert_eq!(buy_event2.filled_price, 10);
         assert_eq!(sell_event2.filled_price, 10);
-        assert_eq!(buy_event2.filled_qty, 60);
-        assert_eq!(sell_event2.filled_qty, 60);
+        assert_eq!(buy_event2.filled_qty, 40);
+        assert_eq!(sell_event2.filled_qty, 40);
 
         // Check final balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1100); // Received 100 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0); // Spent 1000 TokenB
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenA), 900); // Spent 100 TokenA
-        assert_eq!(vault.get_locked(bob, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(bob, Token::TokenB), 2000); // Received 1000 TokenB
-        assert_eq!(vault.get_locked(bob, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1100); // Received 100 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0); // Spent 1000 TokenB
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
+        assert_eq!(vault.get_balance(bob, Token::Base), 900); // Spent 100 TokenA
+        assert_eq!(vault.get_locked(bob, Token::Base), 0);
+        assert_eq!(vault.get_balance(bob, Token::Quote), 2000); // Received 1000 TokenB
+        assert_eq!(vault.get_locked(bob, Token::Quote), 0);
     }
 
     #[test]
@@ -871,32 +854,26 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 10 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 1000).unwrap(); // Lock 1000 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 100, now);
+        vault.lock(alice, Token::Quote, 1000).unwrap(); // Lock 1000 TokenB
         buy_order.locked = 1000;
         book.insert_new_order(buy_order.clone());
 
         // Check initial balances
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 1000);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 1000);
 
         // Cancel the order
         book.cancel_order(alice, buy_order.id, &mut vault).unwrap();
 
         // Check final balances - all locked tokens should be unlocked
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 1000); // All TokenB unlocked
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 1000); // All TokenB unlocked
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
 
         // Try to cancel again - should fail
         assert!(matches!(
@@ -911,28 +888,22 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 10 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 1000).unwrap(); // Lock 1000 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 100, now);
+        vault.lock(alice, Token::Quote, 1000).unwrap(); // Lock 1000 TokenB
         buy_order.locked = 1000;
         book.insert_new_order(buy_order.clone());
 
         // Bob places a sell order: 50 TokenA at price 10 TokenB
         let mut sell_order = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             50,
             now + 1,
         );
-        vault.lock(bob, Token::TokenA, 50).unwrap(); // Lock 50 TokenA
+        vault.lock(bob, Token::Base, 50).unwrap(); // Lock 50 TokenA
         sell_order.locked = 50;
         book.insert_new_order(sell_order.clone());
 
@@ -943,19 +914,19 @@ mod tests {
         assert!(remaining_sell.is_none()); // Sell order should be fully filled
 
         // Check balances after partial fill
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1050); // Received 50 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 500); // 500 TokenB still locked
+        assert_eq!(vault.get_balance(alice, Token::Base), 1050); // Received 50 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 500); // 500 TokenB still locked
 
         // Cancel the partially filled buy order
         book.cancel_order(alice, buy_order.id, &mut vault).unwrap();
 
         // Check final balances - remaining locked tokens should be unlocked
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1050); // Still have 50 TokenA from partial fill
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 500); // All remaining TokenB unlocked
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1050); // Still have 50 TokenA from partial fill
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 500); // All remaining TokenB unlocked
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
     }
 
     #[test]
@@ -964,28 +935,22 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 10 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 1000).unwrap(); // Lock 1000 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 100, now);
+        vault.lock(alice, Token::Quote, 1000).unwrap(); // Lock 1000 TokenB
         buy_order.locked = 1000;
         book.insert_new_order(buy_order.clone());
 
         // Bob places a sell order: 100 TokenA at price 10 TokenB
         let mut sell_order = book.make_new_order(
             bob,
-            (Token::TokenA, Token::TokenB),
+            (Token::Base, Token::Quote),
             Side::Sell,
             10,
             100,
             now + 1,
         );
-        vault.lock(bob, Token::TokenA, 100).unwrap(); // Lock 100 TokenA
+        vault.lock(bob, Token::Base, 100).unwrap(); // Lock 100 TokenA
         sell_order.locked = 100;
         book.insert_new_order(sell_order.clone());
 
@@ -996,10 +961,10 @@ mod tests {
         assert!(remaining_sell.is_none()); // Sell order should be fully filled
 
         // Check balances after full fill
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1100); // Received 100 TokenA
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0); // Spent all TokenB
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 0);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1100); // Received 100 TokenA
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0); // Spent all TokenB
+        assert_eq!(vault.get_locked(alice, Token::Quote), 0);
 
         // Try to cancel the fully filled order - should fail
         assert!(matches!(
@@ -1014,15 +979,9 @@ mod tests {
         let now = 1;
 
         // Alice places a buy order: 100 TokenA at price 10 TokenB
-        let mut buy_order = book.make_new_order(
-            alice,
-            (Token::TokenA, Token::TokenB),
-            Side::Buy,
-            10,
-            100,
-            now,
-        );
-        vault.lock(alice, Token::TokenB, 1000).unwrap(); // Lock 1000 TokenB
+        let mut buy_order =
+            book.make_new_order(alice, (Token::Base, Token::Quote), Side::Buy, 10, 100, now);
+        vault.lock(alice, Token::Quote, 1000).unwrap(); // Lock 1000 TokenB
         buy_order.locked = 1000;
         book.insert_new_order(buy_order.clone());
 
@@ -1033,9 +992,9 @@ mod tests {
         ));
 
         // Check balances - should be unchanged
-        assert_eq!(vault.get_balance(alice, Token::TokenA), 1000);
-        assert_eq!(vault.get_locked(alice, Token::TokenA), 0);
-        assert_eq!(vault.get_balance(alice, Token::TokenB), 0);
-        assert_eq!(vault.get_locked(alice, Token::TokenB), 1000);
+        assert_eq!(vault.get_balance(alice, Token::Base), 1000);
+        assert_eq!(vault.get_locked(alice, Token::Base), 0);
+        assert_eq!(vault.get_balance(alice, Token::Quote), 0);
+        assert_eq!(vault.get_locked(alice, Token::Quote), 1000);
     }
 }

@@ -9,7 +9,7 @@ use crate::{
 #[ink::scale_derive(Encode, Decode, TypeInfo)]
 #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
 #[derive(Debug, Clone, Default)]
-struct Account {
+pub(crate) struct Account {
     balance: u128,
     locked: u128,
 }
@@ -32,13 +32,11 @@ impl Vault {
         self.accounts.get((acct_id, token)).unwrap_or_default()
     }
 
-    #[cfg(test)]
-    pub fn get_balance(&self, acct_id: AccountId, token: Token) -> u128 {
+    pub(crate) fn get_balance(&self, acct_id: AccountId, token: Token) -> u128 {
         self.get_or_default(acct_id, token).balance
     }
 
-    #[cfg(test)]
-    pub fn get_locked(&self, acct_id: AccountId, token: Token) -> u128 {
+    pub(crate) fn get_locked(&self, acct_id: AccountId, token: Token) -> u128 {
         self.get_or_default(acct_id, token).locked
     }
 }
@@ -124,7 +122,7 @@ mod tests {
     fn test_deposit() {
         let (alice, _) = setup();
         let mut vault = Vault::default();
-        let token = Token::TokenA;
+        let token = Token::Base;
 
         // Test initial deposit
         vault.deposit(alice, token, 100);
@@ -142,7 +140,7 @@ mod tests {
     fn test_withdraw() {
         let (alice, _) = setup();
         let mut vault = Vault::default();
-        let token = Token::TokenA;
+        let token = Token::Base;
 
         // Setup initial balance
         vault.deposit(alice, token, 100);
@@ -163,7 +161,7 @@ mod tests {
     fn test_lock() {
         let (alice, _) = setup();
         let mut vault = Vault::default();
-        let token = Token::TokenA;
+        let token = Token::Base;
 
         // Setup initial balance
         vault.deposit(alice, token, 100);
@@ -185,7 +183,7 @@ mod tests {
     fn test_unlock() {
         let (alice, _) = setup();
         let mut vault = Vault::default();
-        let token = Token::TokenA;
+        let token = Token::Base;
 
         // Setup initial balance and locked amount
         vault.deposit(alice, token, 100);
@@ -208,7 +206,7 @@ mod tests {
     fn test_transfer_locked() {
         let (alice, bob) = setup();
         let mut vault = Vault::default();
-        let token = Token::TokenA;
+        let token = Token::Base;
 
         // Setup initial balance and locked amount
         vault.deposit(alice, token, 100);
@@ -242,8 +240,8 @@ mod tests {
     fn test_multiple_tokens() {
         let (alice, _) = setup();
         let mut vault = Vault::default();
-        let token1 = Token::TokenA;
-        let token2 = Token::TokenB;
+        let token1 = Token::Base;
+        let token2 = Token::Quote;
 
         // Test operations with different tokens
         vault.deposit(alice, token1, 100);
