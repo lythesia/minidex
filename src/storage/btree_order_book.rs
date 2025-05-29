@@ -140,18 +140,8 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.remove(order_id);
 
                 // emit
-                evts.push(EventFilled::new(
-                    sell_order.id,
-                    sell_order.side,
-                    deal_price,
-                    sell_order.qty,
-                ));
-                evts.push(EventFilled::new(
-                    buy_order.id,
-                    buy_order.side,
-                    deal_price,
-                    sell_order.qty,
-                ));
+                evts.push(EventFilled::new(sell_order.id, deal_price, sell_order.qty));
+                evts.push(EventFilled::new(buy_order.id, deal_price, sell_order.qty));
             }
             // 2.2 partial fill
             else {
@@ -172,18 +162,8 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.insert(order_id, &sell_order);
 
                 // emit
-                evts.push(EventFilled::new(
-                    sell_order.id,
-                    sell_order.side,
-                    deal_price,
-                    buy_order.qty,
-                ));
-                evts.push(EventFilled::new(
-                    buy_order.id,
-                    buy_order.side,
-                    deal_price,
-                    buy_order.qty,
-                ));
+                evts.push(EventFilled::new(sell_order.id, deal_price, buy_order.qty));
+                evts.push(EventFilled::new(buy_order.id, deal_price, buy_order.qty));
 
                 buy_order.qty = 0;
                 break;
@@ -253,18 +233,8 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.remove(order_id);
 
                 // emit
-                evts.push(EventFilled::new(
-                    buy_order.id,
-                    buy_order.side,
-                    deal_price,
-                    buy_order.qty,
-                ));
-                evts.push(EventFilled::new(
-                    sell_order.id,
-                    sell_order.side,
-                    deal_price,
-                    buy_order.qty,
-                ));
+                evts.push(EventFilled::new(buy_order.id, deal_price, buy_order.qty));
+                evts.push(EventFilled::new(sell_order.id, deal_price, buy_order.qty));
             }
             // 2.2 partial fill
             else {
@@ -284,18 +254,8 @@ impl OrderBook for BTreeOrderBook {
                 self.orders.insert(order_id, &buy_order);
 
                 // emit
-                evts.push(EventFilled::new(
-                    buy_order.id,
-                    buy_order.side,
-                    deal_price,
-                    sell_order.qty,
-                ));
-                evts.push(EventFilled::new(
-                    sell_order.id,
-                    sell_order.side,
-                    deal_price,
-                    sell_order.qty,
-                ));
+                evts.push(EventFilled::new(buy_order.id, deal_price, sell_order.qty));
+                evts.push(EventFilled::new(sell_order.id, deal_price, sell_order.qty));
                 sell_order.qty = 0;
                 break;
             }
