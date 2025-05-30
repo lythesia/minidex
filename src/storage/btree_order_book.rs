@@ -287,12 +287,20 @@ impl OrderBook for BTreeOrderBook {
             Side::Buy => {
                 // unlock unfills
                 // assert ok: unlock always success
-                let amt = order.price.checked_mul(order.qty).unwrap();
-                vault.unlock(order.owner, quote, amt).unwrap();
+                if order.locked > 0 {
+                    vault.unlock(order.owner, quote, order.locked).unwrap();
+                }
                 // clear buy order
                 #[allow(clippy::arithmetic_side_effects)]
                 let key = (u128::MAX - order.price, order.timestamp, order.id);
                 self.buy_orders.remove(&key);
+                if order.price == self.max_buy_price {
+                    self.max_buy_price = self
+                        .buy_orders
+                        .first_entry()
+                        .map(|e| u128::MAX.checked_sub(e.key().0).unwrap())
+                        .unwrap_or(0);
+                }
             }
             Side::Sell => {
                 // unlock unfills
@@ -301,7 +309,14 @@ impl OrderBook for BTreeOrderBook {
                 // clear sell order
                 #[allow(clippy::arithmetic_side_effects)]
                 let key = (order.price, order.timestamp, order.id);
-                self.buy_orders.remove(&key);
+                self.sell_orders.remove(&key);
+                if order.price == self.min_sell_price {
+                    self.min_sell_price = self
+                        .sell_orders
+                        .first_entry()
+                        .map(|e| e.key().0)
+                        .unwrap_or(u128::MAX);
+                }
             }
         }
         self.orders.remove(order_id);
